@@ -143,7 +143,15 @@ def generate_html():
     </body>
     </html>
     """
+    if not os.path.exists("public"):
+        os.makedirs("public")
+    # -------------------------------
 
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    print("2. Page HTML générée avec succès.")
+    return True
+    
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html_content)
     print("2. Page HTML générée avec succès.")
@@ -155,4 +163,5 @@ def deploy_to_firebase():
 
 if __name__ == "__main__":
     if generate_html():
+
         deploy_to_firebase()
