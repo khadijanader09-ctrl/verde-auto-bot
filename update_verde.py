@@ -1,164 +1,357 @@
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
-import feedparser  # On utilise l'outil spécialisé pour le RSS externe
+import feedparser
 import os
 import datetime
+import re
 import random
+import json
 
 # --- CONFIGURATION ---
 MY_SITE_URL = "https://verdevoice.com"
-
-# NOUVELLE SOURCE (Google News : Incassable et très haute autorité)
-AUTHORITY_RSS = "https://news.google.com/rss/search?q=écologie+environnement&hl=fr&gl=FR&ceid=FR:fr"
-
+# On vise large : Global News + Environment (pour coller à la ligne édito)
+AUTHORITY_RSS = "https://news.google.com/rss/search?q=world+news+environment+technology&hl=en-US&gl=US&ceid=US:en"
 OUTPUT_FILE = "public/index.html"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
-def get_external_news(rss_url, limit=3):
-    """ Utilise feedparser pour lire le RSS externe de manière fiable """
-    print(f"   -> Récupération du camouflage (Futura)...")
+# Images à bannir
+EXCLUDED_IMGS = ["placeholder", "logo.svg", "default", "blank", "1x1", "pixel"]
+
+# BANQUE D'IMAGES (Thème : Monde / Nature / Tech Verte)
+THEMATIC_IMAGES = [
+    "https://images.unsplash.com/photo-1502082553048-f009c37129b9?auto=format&fit=crop&w=600&q=80", # Nature Tree
+    "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=600&q=80", # Globe Tech
+    "https://images.unsplash.com/photo-1497436072909-60f360e1d4b0?auto=format&fit=crop&w=600&q=80", # Green City
+    "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?auto=format&fit=crop&w=600&q=80", # City Night
+    "https://images.unsplash.com/photo-1466611653911-95081537e5b7?auto=format&fit=crop&w=600&q=80", # Wind Energy
+    "https://images.unsplash.com/photo-1581093450021-4a7360e9a6b5?auto=format&fit=crop&w=600&q=80", # Lab Tech
+    "https://images.unsplash.com/photo-1500382017468-9049fed747ef?auto=format&fit=crop&w=600&q=80"  # Fields
+]
+FALLBACK_IMG = "https://verdevoice.com/assets/logo.png" # Ou une image générique verte
+
+# SEO
+SEO_DESC = "VerdeVoice - Latest global news, technology updates and sustainable future reports."
+SEO_KEYWORDS = "global news, environment, technology, verdevoice, international updates, sustainability"
+
+scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
+
+FOUND_CATEGORIES = {}
+
+def clean_html(raw_html):
+    if not raw_html: return ""
+    cleanr = re.compile('<.*?>')
+    text = re.sub(cleanr, '', raw_html)
+    return text[:140] + "..."
+
+def get_external_news(rss_url, limit=6):
+    print(f"   -> 🌍 Google News...")
     try:
-        # On utilise feedparser avec un User-Agent pour ne pas être bloqué
-        feed = feedparser.parse(rss_url, agent=USER_AGENT)
-        
-        external_links = []
-        
-        if not feed.entries:
-            print(f"      [!] Attention : Le flux externe semble vide ou bloqué.")
-            return []
+        response = scraper.get(rss_url)
+        feed = feedparser.parse(response.content)
+        links = []
+        if not feed.entries: return []
 
         for entry in feed.entries:
-            # Nettoyage basique
-            title = entry.title
-            link = entry.link
+            img_src = random.choice(THEMATIC_IMAGES)
+            desc = clean_html(entry.description) if hasattr(entry, 'description') else ""
             
-            external_links.append({'title': title, 'link': link, 'is_mine': False})
-            
-            if len(external_links) >= limit:
-                break
-                
-        print(f"      > {len(external_links)} articles externes trouvés.")
-        return external_links
+            links.append({
+                'title': entry.title, 
+                'link': entry.link, 
+                'img': img_src, 
+                'desc': desc,
+                'source': 'Global News',
+                'category': 'World', # Catégorie par défaut pour externe
+                'cat_link': f"{MY_SITE_URL}/news_en.html",
+                'is_mine': False,
+                'date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            })
+            if len(links) >= limit: break
+        return links
     except Exception as e:
-        print(f"      [!] Erreur camouflage : {e}")
+        print(f"      [!] Erreur Google: {e}")
         return []
 
 def get_my_links():
-    """ Scrape TES articles via BeautifulSoup """
-    print(f"   -> Récupération de tes articles (VerdeVoice)...")
+    print(f"   -> 🏠 VerdeVoice...")
     try:
-        response = requests.get(MY_SITE_URL, headers={"User-Agent": USER_AGENT}, timeout=15)
+        response = scraper.get(MY_SITE_URL)
+        response.encoding = 'utf-8'
+        
+        if response.status_code != 200: return []
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         my_links = []
-        potential_titles = soup.find_all(['h2', 'h3'])
         
-        for title_tag in potential_titles:
-            link_tag = title_tag.find('a')
-            if link_tag and link_tag.get('href'):
-                url = link_tag.get('href')
-                text = link_tag.get_text().strip()
-                
-                if len(text) > 10:
-                    my_links.append({'title': text, 'link': url, 'is_mine': True})
-                
-                if len(my_links) >= 5: # On prend 5 de tes articles
-                    break
+        # Cible spécifique VerdeVoice (art-card)
+        cards = soup.find_all('article', class_='art-card')
         
-        print(f"      > {len(my_links)} de tes articles trouvés.")
+        for card in cards:
+            # Titre & Lien
+            h2 = card.find(class_='art-h2')
+            if not h2: continue
+            link_tag = h2.find('a')
+            if not link_tag: continue
+            
+            url = link_tag.get('href')
+            if not url: continue
+            if url.startswith('/'): url = MY_SITE_URL + url
+            title = link_tag.get_text().strip()
+
+            # Image
+            thumb = card.find(class_='art-thumb')
+            if not thumb: continue
+            img_tag = thumb.find('img')
+            if not img_tag: continue
+            
+            img_src = img_tag.get('src') or img_tag.get('data-src')
+            if not img_src: continue
+            if img_src.startswith('/'): img_src = MY_SITE_URL + img_src
+            
+            # Filtre images
+            is_bad = False
+            for bad in EXCLUDED_IMGS:
+                if bad in img_src: is_bad = True
+            if is_bad: continue
+
+            # Catégorie (Spécifique VerdeVoice: class='cat-tag')
+            cat_name = "News"
+            cat_link_url = f"{MY_SITE_URL}/news_en.html"
+            try:
+                cat_elem = card.find(class_='cat-tag')
+                if cat_elem:
+                    cat_name = cat_elem.get_text().strip()
+                    if cat_elem.name == 'a':
+                        cat_link_url = cat_elem.get('href')
+                        if cat_link_url and cat_link_url.startswith('/'):
+                            cat_link_url = MY_SITE_URL + cat_link_url
+                        FOUND_CATEGORIES[cat_name] = cat_link_url
+            except: pass
+
+            # Description
+            desc_div = card.find(class_='art-desc')
+            desc = ""
+            if desc_div:
+                txt = desc_div.get_text().strip()
+                if len(txt) > 20: desc = txt[:140] + "..."
+
+            # Date
+            date_div = card.find(class_='art-date')
+            date_txt = date_div.get_text().strip() if date_div else datetime.datetime.now().strftime("%Y-%m-%d")
+
+            if not any(d['link'] == url for d in my_links):
+                my_links.append({
+                    'title': title, 
+                    'link': url, 
+                    'img': img_src,
+                    'desc': desc,
+                    'source': 'VerdeVoice',
+                    'category': cat_name,
+                    'cat_link': cat_link_url,
+                    'is_mine': True,
+                    'date': date_txt
+                })
+
+            if len(my_links) >= 6: break
+        
+        print(f"      > {len(my_links)} articles valides trouvés.")
         return my_links
+
     except Exception as e:
-        print(f"      [!] Erreur scraping perso : {e}")
+        print(f"      [!] Erreur scraping : {e}")
         return []
 
 def generate_html():
-    print("1. Construction du Mix SEO (Hybride)...")
+    print("1. Génération Design VerdeVoice...")
     
     my_news = get_my_links()
-    auth_news = get_external_news(AUTHORITY_RSS, limit=4) 
+    auth_news = get_external_news(AUTHORITY_RSS, limit=6)
     
-    if not my_news:
-        print("ERREUR CRITIQUE : Tes articles sont introuvables.")
-        return False
+    final_list = []
+    if not my_news: my_news = []
+    if not auth_news: auth_news = []
+    
+    max_len = max(len(my_news), len(auth_news))
+    for i in range(max_len):
+        if i < len(my_news): final_list.append(my_news[i])
+        if i < len(auth_news): final_list.append(auth_news[i])
 
-    # --- MÉLANGE INTELLIGENT ---
-    # Si on a des news externes, on fait le sandwich. 
-    # Sinon, on met juste les tiennes (plan B).
-    if len(auth_news) >= 2:
-        final_list = auth_news[:2] + my_news + auth_news[2:]
-    else:
-        final_list = my_news
+    now_str = datetime.datetime.now().strftime("%H:%M")
+    year = datetime.datetime.now().year
+
+    # Tags Dynamiques Footer
+    tags_html = ""
+    if not FOUND_CATEGORIES:
+        FOUND_CATEGORIES["Latest News"] = f"{MY_SITE_URL}/news_en.html"
     
+    for name, link in FOUND_CATEGORIES.items():
+        tags_html += f'<a href="{link}" target="_blank" class="footer-tag">{name}</a>'
+
+    # JSON-LD
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "NewsMediaOrganization",
+        "name": "VerdeVoice News",
+        "url": "https://verdevoice.com",
+        "logo": "https://verdevoice.com/assets/logo.png"
+    }
+
     html_content = f"""
     <!DOCTYPE html>
-    <html lang="fr">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="google-site-verification" content="oeHmZmpFuk822bvs-DMKLdUons-NklXRos4dn6-tw4Y" />
-        <title>Verde News : L'actualité Verte en Continu</title>
+        <title>VerdeVoice - Live Feed</title>
+        <meta name="description" content="{SEO_DESC}">
+        <meta name="keywords" content="{SEO_KEYWORDS}">
+        <link rel="icon" href="https://verdevoice.com/assets/favicon.png">
+        <script type="application/ld+json">{json.dumps(json_ld)}</script>
+        
         <style>
-            body {{ font-family: 'Segoe UI', sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }}
-            h1 {{ color: #2e7d32; border-bottom: 3px solid #81c784; padding-bottom: 10px; }}
-            .article {{ margin-bottom: 15px; padding: 15px; border-radius: 8px; transition: transform 0.2s; }}
-            .article:hover {{ transform: translateX(5px); }}
+            /* CSS VERDEVOICE ORIGINAL */
+            :root {{ 
+                --bg: #f5fcfb; --card: #ffffff; --text: #0f172a; 
+                --muted: #64748b; --brand: #0f766e; --accent: #14b8a6; 
+                --line: #e2e8f0; --shadow: 0 4px 6px -1px rgba(15, 118, 110, 0.1); 
+            }}
+            body {{ margin: 0; background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.6; }}
+            a {{ color: inherit; text-decoration: none; transition: .2s; }}
+            a:hover {{ color: var(--brand); }}
+            .container {{ max-width: 1000px; margin: 0 auto; padding: 0 15px; }}
             
-            /* Style pour TES articles (Vert clair) */
-            .mine {{ background: #f1f8e9; border-left: 5px solid #2e7d32; }}
-            .mine a {{ color: #1b5e20; font-weight: bold; font-size: 1.1em; text-decoration:none; }}
+            /* HEADER */
+            header.site {{ background: var(--card); border-bottom: 3px solid var(--brand); padding: 10px 0; position:sticky; top:0; z-index:50; box-shadow: var(--shadow); }}
+            .head-row {{ display: flex; justify-content: space-between; align-items: center; }}
+            .brand {{ display: flex; align-items: center; gap: 10px; font-size: 1.5rem; font-weight: 800; color: var(--brand); text-transform: uppercase; }}
+            .brand svg {{ width: 30px; height: 30px; fill: var(--brand); }}
             
-            /* Style pour les articles AUTORITÉ (Blanc/Gris) */
-            .external {{ background: #fff; border: 1px solid #e0e0e0; border-left: 5px solid #ccc; }}
-            .external a {{ color: #555; font-weight: normal; text-decoration: none; }}
+            .lang-btns {{ display: flex; gap: 8px; }}
+            .l-btn {{ display: inline-flex; justify-content: center; align-items: center; width: 35px; height: 35px; background: #fff; color: var(--brand); border: 2px solid var(--brand); font-weight: 700; border-radius: 4px; font-size: 0.8rem; }}
+            .l-btn:hover {{ background: var(--brand); color: #fff; }}
+
+            /* GRID & CARDS */
+            .card-list {{ display: flex; flex-direction: column; gap: 20px; margin-top: 30px; }}
             
-            .source-tag {{ font-size: 0.75em; text-transform: uppercase; margin-bottom: 5px; display:block; font-weight:bold; }}
-            .tag-mine {{ color: #2e7d32; }}
-            .tag-ext {{ color: #999; }}
+            /* DESIGN HORIZONTAL (Spécifique VerdeVoice) */
+            .art-card {{ 
+                display: flex; gap: 20px; background: var(--card); 
+                border: 1px solid var(--line); border-radius: 8px; 
+                overflow: hidden; box-shadow: var(--shadow); 
+                height: 200px; /* Hauteur fixe pour uniformité */
+            }}
+            
+            .art-thumb {{ width: 280px; flex-shrink: 0; position: relative; background:#eee; }} 
+            .art-thumb img {{ width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s; }}
+            .art-card:hover .art-thumb img {{ transform: scale(1.05); }}
+            
+            .art-info {{ padding: 20px; display: flex; flex-direction: column; justify-content: center; flex: 1; }}
+            
+            .cat-tag {{ 
+                background: var(--brand); color: #fff; padding: 4px 8px; 
+                font-size: 0.7rem; border-radius: 4px; text-transform: uppercase; 
+                width: fit-content; margin-bottom: 8px; font-weight:bold;
+            }}
+            .tag-ext {{ background: var(--muted); }} /* Gris pour Google News */
+            
+            .art-h2 {{ margin: 0 0 10px 0; font-size: 1.3rem; line-height: 1.3; font-weight:700; }}
+            
+            .art-desc {{ 
+                font-size: 0.95rem; color: var(--muted); opacity: 0.9; 
+                margin-bottom: 10px; line-height: 1.5; 
+                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; 
+            }}
+            .art-desc:empty {{ display:none; }}
+
+            .art-date {{ font-size: 0.8rem; color: var(--muted); margin-top: auto; display:flex; justify-content:space-between; }}
+
+            /* MOBILE */
+            @media (max-width: 700px) {{
+                .art-card {{ flex-direction: column; height: auto; }}
+                .art-thumb {{ width: 100%; height: 200px; }}
+            }}
+
+            /* FOOTER TAGS */
+            .tags-section {{ margin-top: 50px; padding: 40px 20px; background: #f0fdfa; border-top: 1px solid var(--brand); text-align:center; }}
+            .footer-tag {{ 
+                display:inline-block; margin:5px; padding: 6px 14px; background: #fff; border: 1px solid var(--brand); 
+                border-radius: 20px; font-size: 0.8rem; font-weight: 600; color: var(--brand);
+            }}
+            .footer-tag:hover {{ background: var(--brand); color: #fff; }}
         </style>
     </head>
     <body>
-        <h1>🌍 Verde News - Agrégateur</h1>
-        <p>Sélection du web et dossiers spéciaux ({datetime.datetime.now().strftime("%d/%m/%Y")})</p>
-        
-        <div id="news-container">
+
+    <header class="site">
+        <div class="container head-row">
+            <a href="https://verdevoice.com" class="brand">
+                <svg viewBox="0 0 24 24"><path d="M17,8C8,10 5.9,16.17 3.82,21.34L5.71,22L6.66,19.7C7.14,19.87 7.64,20 8,20C19,20 22,3 22,3C21,5 14,5.25 9,6.25C4,7.25 2,11.5 2,13.5C2,15.5 3.75,17.25 3.75,17.25C7,8 17,8 17,8Z"/></svg> 
+                VerdeVoice
+            </a>
+            <div class="lang-btns">
+                <a href="https://verdevoice.com/news_en.html" class="l-btn">EN</a>
+                <a href="https://verdevoice.com/news_fr.html" class="l-btn">FR</a>
+                <a href="https://verdevoice.com/news_es.html" class="l-btn">ES</a>
+                <a href="https://verdevoice.com/news_ar.html" class="l-btn">AR</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <div style="margin: 30px 0; border-bottom: 2px solid var(--line); padding-bottom: 10px;">
+            <span style="font-size: 1.5rem; font-weight: 800; color: var(--brand);">LIVE FEED</span>
+            <span style="float:right; font-family:monospace; color:var(--muted);">{now_str} UTC</span>
+        </div>
+
+        <div class="card-list">
     """
 
     for item in final_list:
-        css_class = "mine" if item['is_mine'] else "external"
-        tag_class = "tag-mine" if item['is_mine'] else "tag-ext"
-        source_label = "⭐ Dossier VerdeVoice" if item['is_mine'] else "📰 Ailleurs sur le web"
+        fallback = random.choice(THEMATIC_IMAGES)
+        cat_class = "cat-tag" if item['is_mine'] else "cat-tag tag-ext"
         
         html_content += f"""
-            <div class="article {css_class}">
-                <span class="source-tag {tag_class}">{source_label}</span>
-                <a href="{item['link']}" target="_blank">{item['title']}</a>
+        <article class="art-card">
+            <div class="art-thumb">
+                <a href="{item['link']}" target="_blank">
+                    <img src="{item['img']}" alt="{item['title']}" loading="lazy" onerror="this.src='{fallback}'">
+                </a>
             </div>
+            <div class="art-info">
+                <div>
+                    <a href="{item['cat_link']}" class="{cat_class}" target="_blank">{item['category']}</a>
+                </div>
+                <h2 class="art-h2"><a href="{item['link']}" target="_blank">{item['title']}</a></h2>
+                <div class="art-desc">{item['desc']}</div>
+                <div class="art-date">
+                    <span>{item['date']}</span>
+                    <span>{item['source']}</span>
+                </div>
+            </div>
+        </article>
         """
 
-    html_content += """
+    html_content += f"""
         </div>
-        <div style="text-align:center; margin-top:50px; font-size:0.8em; color:#aaa; border-top:1px solid #eee; padding-top:20px;">
-            Agrégateur automatique d'actualités écologiques.
-        </div>
+    </main>
+
+    <div class="tags-section">
+        <h4 style="color:var(--brand); text-transform:uppercase; margin-bottom:20px;">Trending Topics</h4>
+        <div>{tags_html}</div>
+        <p style="margin-top:30px; font-size:0.8rem; color:var(--muted);">© {year} VerdeVoice Global.</p>
+    </div>
+
     </body>
     </html>
     """
+
     if not os.path.exists("public"):
         os.makedirs("public")
-    # -------------------------------
-
         
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html_content)
-    print("2. Page HTML générée avec succès.")
+    print("2. HTML VerdeVoice généré.")
     return True
-
-def deploy_to_firebase():
-    print("3. Envoi vers Firebase...")
-    os.system("firebase deploy --only hosting")
 
 if __name__ == "__main__":
     if generate_html():
-
-        deploy_to_firebase()
-
+        os.system("firebase deploy --only hosting")
